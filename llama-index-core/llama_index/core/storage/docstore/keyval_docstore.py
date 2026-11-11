@@ -511,11 +511,13 @@ class KVDocumentStore(BaseDocumentStore):
         Helper function to remove node doc_id from ref_doc_collection.
         If ref_doc has no more doc_ids, delete it from the collection.
         """
-        ref_doc_id, ref_doc_info = await asyncio.gather(
-            self._aget_ref_doc_id(doc_id),
-            self.aget_ref_doc_info(doc_id),
-        )
-        if ref_doc_id is None or ref_doc_info is None:
+        # The ref-doc record is keyed by the parent id stored on this node, not
+        # by the node id itself. Resolve that parent before loading the record.
+        ref_doc_id = await self._aget_ref_doc_id(doc_id)
+        if ref_doc_id is None:
+            return
+        ref_doc_info = await self.aget_ref_doc_info(ref_doc_id)
+        if ref_doc_info is None:
             return
 
         if doc_id in ref_doc_info.node_ids:  # sanity check
@@ -545,11 +547,13 @@ class KVDocumentStore(BaseDocumentStore):
 
     async def adelete_document(self, doc_id: str, raise_error: bool = True) -> None:
         """Delete a document from the store."""
-        _, delete_success, _ = await asyncio.gather(
-            self._aremove_from_ref_doc_node(doc_id),
-            self._kvstore.adelete(doc_id, collection=self._node_collection),
-            self._kvstore.adelete(doc_id, collection=self._metadata_collection),
+        # Update the parent ref-doc mapping before deleting this node's metadata.
+        # The mapping lookup reads the metadata row removed below.
+        await self._aremove_from_ref_doc_node(doc_id)
+        delete_success = await self._kvstore.adelete(
+            doc_id, collection=self._node_collection
         )
+        await self._kvstore.adelete(doc_id, collection=self._metadata_collection)
 
         if not delete_success and raise_error:
             raise ValueError(f"doc_id {doc_id} not found.")
