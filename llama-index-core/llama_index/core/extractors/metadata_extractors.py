@@ -436,15 +436,34 @@ class SummaryExtractor(BaseExtractor):
             workers=self.num_workers,
         )
 
-        # Extract node-level summary metadata
+        # Prev/next summaries are neighboring sections of one document.
+        # Ingestion passes every node in the batch together, so two nodes
+        # that are adjacent in this list can belong to different documents.
+        groups: Dict[Optional[str], List[int]] = {}
+        for index, node in enumerate(nodes):
+            groups.setdefault(node.ref_doc_id, []).append(index)
+
         metadata_list: List[Dict] = [{} for _ in nodes]
-        for i, metadata in enumerate(metadata_list):
-            if i > 0 and self._prev_summary and node_summaries[i - 1]:
-                metadata["prev_section_summary"] = node_summaries[i - 1]
-            if i < len(nodes) - 1 and self._next_summary and node_summaries[i + 1]:
-                metadata["next_section_summary"] = node_summaries[i + 1]
-            if self._self_summary and node_summaries[i]:
-                metadata["section_summary"] = node_summaries[i]
+        for indices in groups.values():
+            for position, index in enumerate(indices):
+                if (
+                    position > 0
+                    and self._prev_summary
+                    and node_summaries[indices[position - 1]]
+                ):
+                    metadata_list[index]["prev_section_summary"] = node_summaries[
+                        indices[position - 1]
+                    ]
+                if (
+                    position < len(indices) - 1
+                    and self._next_summary
+                    and node_summaries[indices[position + 1]]
+                ):
+                    metadata_list[index]["next_section_summary"] = node_summaries[
+                        indices[position + 1]
+                    ]
+                if self._self_summary and node_summaries[index]:
+                    metadata_list[index]["section_summary"] = node_summaries[index]
 
         return metadata_list
 
