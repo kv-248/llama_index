@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from llama_index.llms.llama_cpp import base as llama_cpp_base
 from llama_index.core.base.llms.base import BaseLLM
 from llama_index.llms.llama_cpp import LlamaCPP
@@ -74,3 +76,52 @@ def test_context_window_read_back_from_model(tmp_path, monkeypatch):
     assert llm._model.requested_n_ctx == 0
     assert llm.context_window == 4096
     assert llm.metadata.context_window == 4096
+
+
+class _FakeDownloadResponse:
+    def __init__(self, headers, chunks):
+        self.headers = headers
+        self._chunks = chunks
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def iter_content(self, chunk_size):
+        yield from self._chunks
+
+
+def test_download_url_accepts_chunked_body_without_content_length(
+    tmp_path, monkeypatch
+):
+    """A chunked response with no Content-Length is not a zero-byte file."""
+    body = b"x" * (1000 * 1000)
+
+    def fake_get(url, stream=True):
+        assert stream is True
+        return _FakeDownloadResponse(headers={}, chunks=[body])
+
+    monkeypatch.setattr(llama_cpp_base.requests, "get", fake_get)
+    dest = tmp_path / "model.gguf"
+
+    LlamaCPP._download_url(None, "https://example.invalid/model.gguf", str(dest))
+
+    assert dest.read_bytes() == body
+
+
+def test_download_url_rejects_undersized_content_length(tmp_path, monkeypatch):
+    def fake_get(url, stream=True):
+        return _FakeDownloadResponse(
+            headers={"Content-Length": "10"}, chunks=[b"0123456789"]
+        )
+
+    monkeypatch.setattr(llama_cpp_base.requests, "get", fake_get)
+    dest = tmp_path / "model.gguf"
+
+    with pytest.raises(ValueError, match="at least 1 MB, but is only 10 bytes") as exc:
+        LlamaCPP._download_url(None, "https://example.invalid/model.gguf", str(dest))
+
+    assert exc.value.args == ("Content should be at least 1 MB, but is only 10 bytes",)
+    assert not dest.exists()

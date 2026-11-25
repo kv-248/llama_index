@@ -38,6 +38,9 @@ DEFAULT_LLAMA_CPP_GGUF_MODEL = (
     "/main/llama-2-13b-chat.Q4_0.gguf"
 )
 DEFAULT_LLAMA_CPP_MODEL_VERBOSITY = True
+# Reject HTML error pages and other tiny responses, but do not treat a missing
+# Content-Length (chunked transfer) as a zero-byte file.
+_MIN_MODEL_DOWNLOAD_BYTES = 1000 * 1000
 
 
 class LlamaCPP(CustomLLM):
@@ -228,34 +231,53 @@ class LlamaCPP(CustomLLM):
             return DEFAULT_LLAMA_CPP_GGUF_MODEL
 
     def _download_url(self, model_url: str, model_path: str) -> None:
-        completed = False
+        print("Downloading url", model_url, "to path", model_path)
         try:
-            print("Downloading url", model_url, "to path", model_path)
-            with requests.get(model_url, stream=True) as r:
+            with requests.get(model_url, stream=True) as response:
                 with open(model_path, "wb") as file:
-                    total_size = int(r.headers.get("Content-Length") or "0")
-                    if total_size < 1000 * 1000:
+                    content_length = response.headers.get("Content-Length")
+                    declared_size = (
+                        int(content_length) if content_length is not None else None
+                    )
+                    if (
+                        declared_size is not None
+                        and declared_size < _MIN_MODEL_DOWNLOAD_BYTES
+                    ):
                         raise ValueError(
-                            "Content should be at least 1 MB, but is only",
-                            r.headers.get("Content-Length"),
-                            "bytes",
+                            "Content should be at least 1 MB, but is only "
+                            f"{declared_size} bytes"
                         )
-                    print("total size (MB):", round(total_size / 1000 / 1000, 2))
+                    if declared_size is not None:
+                        print(
+                            "total size (MB):",
+                            round(declared_size / 1000 / 1000, 2),
+                        )
                     chunk_size = 1024 * 1024  # 1 MB
+                    written = 0
                     for chunk in tqdm(
-                        r.iter_content(chunk_size=chunk_size),
-                        total=int(total_size / chunk_size),
+                        response.iter_content(chunk_size=chunk_size),
+                        total=(
+                            None
+                            if declared_size is None
+                            else max(declared_size // chunk_size, 1)
+                        ),
                         unit="MB",
                     ):
+                        if not chunk:
+                            continue
                         file.write(chunk)
-            completed = True
-        except Exception as e:
-            print("Error downloading model:", e)
-        finally:
-            if not completed:
+                        written += len(chunk)
+                    if written < _MIN_MODEL_DOWNLOAD_BYTES:
+                        raise ValueError(
+                            "Content should be at least 1 MB, but is only "
+                            f"{written} bytes"
+                        )
+        except Exception as exc:
+            print("Error downloading model:", exc)
+            if os.path.exists(model_path):
                 print("Download incomplete.", "Removing partially downloaded file.")
                 os.remove(model_path)
-                raise ValueError("Download incomplete.")
+            raise
 
     @llm_chat_callback()
     def chat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> ChatResponse:
